@@ -90,6 +90,125 @@ function Check-WindowsUpdates {
     return $searchResult.Updates.Count
 }
 
+# Function to check audio devices
+function Test-AudioDevices {
+    try {
+        $audioDevices = Get-CimInstance -ClassName Win32_SoundDevice
+        $results = @()
+        foreach ($device in $audioDevices) {
+            # StatusInfo values from CIM_LogicalDevice official documentation
+            $statusInfo = switch ($device.StatusInfo) {
+                1 { @{Status = "Other"; Message = "Other/Unknown status"} }
+                2 { @{Status = "Unknown"; Message = "Status cannot be determined"} }
+                3 { @{Status = "OK"; Message = "Device is running at full power"} }
+                4 { @{Status = "Warning"; Message = "Device requires attention"} }
+                5 { @{Status = "In Test"; Message = "Device is in testing mode"} }
+                6 { @{Status = "Not Applicable"; Message = "Status not applicable for this device"} }
+                7 { @{Status = "Power Off"; Message = "Device is powered off"} }
+                8 { @{Status = "Off Line"; Message = "Device is offline"} }
+                9 { @{Status = "Off Duty"; Message = "Device is off duty"} }
+                10 { @{Status = "Degraded"; Message = "Device is running in degraded state"} }
+                11 { @{Status = "Not Installed"; Message = "Device is not installed"} }
+                12 { @{Status = "Install Error"; Message = "Installation error detected"} }
+                13 { @{Status = "Power Save"; Message = "Device is in power save mode"} }
+                default { @{Status = "Unknown"; Message = "Status code not recognized"} }
+            }
+
+            # Additional device state check from ConfigManagerErrorCode
+            $state = switch ($device.ConfigManagerErrorCode) {
+                0 { "Device is working properly" }
+                1 { "Device is not configured correctly" }
+                2 { "Windows cannot load the driver" }
+                3 { "Driver is corrupted" }
+                4 { "Device is not working properly" }
+                5 { "Device requires a restart" }
+                6 { "Device has a resource conflict" }
+                7 { "Driver installation is required" }
+                8 { "Resource settings are invalid" }
+                9 { "Device is not responding" }
+                10 { "Device cannot start" }
+                default { $null }
+            }
+
+            if ($state) {
+                $statusInfo.Message += ". $state"
+            }
+
+            $results += [PSCustomObject]@{
+                Name = $device.Name
+                Status = $statusInfo.Status
+                Description = $device.Description
+                StatusMessage = $statusInfo.Message
+            }
+        }
+        return $results
+    } catch {
+        Write-Warning "Error checking audio devices: $_"
+        return $null
+    }
+}
+
+# Function to get detailed network adapter information
+function Get-NetworkAdapterInfo {
+    try {
+        $adapters = Get-NetAdapter | Where-Object { $_.Status -eq "Up" }
+        $results = @()
+        foreach ($adapter in $adapters) {
+            $ipConfig = Get-NetIPAddress -InterfaceIndex $adapter.ifIndex -AddressFamily IPv4
+            # Fix: Convert LinkSpeed string to numeric value
+            $speedString = $adapter.LinkSpeed
+            $speed = if ($speedString -match '(\d+\.?\d*)\s*\w+') {
+                [double]$matches[1]
+            } else {
+                0
+            }
+            
+            $results += [PSCustomObject]@{
+                Name = $adapter.Name
+                Description = $adapter.InterfaceDescription
+                Status = $adapter.Status
+                Speed = $speed  # Already in Mbps
+                IPAddress = $ipConfig.IPAddress
+                MacAddress = $adapter.MacAddress
+            }
+        }
+        return $results
+    } catch {
+        Write-Warning "Error getting network adapter information: $_"
+        return $null
+    }
+}
+
+# Function to check system services
+function Test-CriticalServices {
+    try {
+        $criticalServices = @(
+            "wuauserv",      # Windows Update
+            "AudioSrv",      # Windows Audio
+            "BITS",          # Background Intelligent Transfer Service
+            "DPS",           # Diagnostic Policy Service
+            "Dnscache",      # DNS Client
+            "nsi"            # Network Store Interface Service
+        )
+        
+        $results = @()
+        foreach ($service in $criticalServices) {
+            $svc = Get-Service -Name $service -ErrorAction SilentlyContinue
+            if ($svc) {
+                $results += [PSCustomObject]@{
+                    Name = $svc.DisplayName
+                    Status = $svc.Status
+                    StartType = $svc.StartType
+                }
+            }
+        }
+        return $results
+    } catch {
+        Write-Warning "Error checking critical services: $_"
+        return $null
+    }
+}
+
 # Function to generate HTML report
 function Generate-HTMLReport {
     $sysInfo = Get-SystemInfo
@@ -98,6 +217,9 @@ function Generate-HTMLReport {
     $diskUsage = Get-DiskUsage
     $networkConnectivity = Test-NetworkConnectivity
     $windowsUpdates = Check-WindowsUpdates
+    $audioDevices = Test-AudioDevices
+    $networkAdapters = Get-NetworkAdapterInfo
+    $criticalServices = Test-CriticalServices
 
     $date = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
     $computerName = $env:COMPUTERNAME
@@ -204,6 +326,36 @@ function Generate-HTMLReport {
             <div class="section">
                 <h2>Windows Updates</h2>
                 <p>Pending Updates: <span class="$(if($windowsUpdates -eq 0){'status-good'}else{'status-bad'})">$windowsUpdates</span></p>
+            </div>
+
+            <div class="section">
+                <h2>Audio Devices</h2>
+                <table>
+                    <tr><th>Device Name</th><th>Status</th><th>Description</th><th>Status Details</th></tr>
+                    $($audioDevices | ForEach-Object { 
+                        "<tr><td>$($_.Name)</td><td class='$(if($_.Status -eq 'OK'){'status-good'}else{'status-bad'})'>$($_.Status)</td><td>$($_.Description)</td><td>$($_.StatusMessage)</td></tr>" 
+                    })
+                </table>
+            </div>
+
+            <div class="section">
+                <h2>Network Adapters</h2>
+                <table>
+                    <tr><th>Name</th><th>Status</th><th>Speed (Mbps)</th><th>IP Address</th><th>MAC Address</th></tr>
+                    $($networkAdapters | ForEach-Object { 
+                        "<tr><td>$($_.Name)</td><td>$($_.Status)</td><td>$($_.Speed)</td><td>$($_.IPAddress)</td><td>$($_.MacAddress)</td></tr>" 
+                    })
+                </table>
+            </div>
+
+            <div class="section">
+                <h2>Critical Services</h2>
+                <table>
+                    <tr><th>Service Name</th><th>Status</th><th>Start Type</th></tr>
+                    $($criticalServices | ForEach-Object { 
+                        "<tr><td>$($_.Name)</td><td class='$(if($_.Status -eq 'Running'){'status-good'}else{'status-bad'})'>$($_.Status)</td><td>$($_.StartType)</td></tr>" 
+                    })
+                </table>
             </div>
         </div>
     </body>
